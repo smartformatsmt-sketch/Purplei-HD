@@ -295,4 +295,19 @@ class Stance:
 
 ---
 
-(End of insertion)
+# 6. Phase Layer
+
+The Phase layer represents the user’s **experiential or ritual phase** within a temporal sequence.  
+Phases describe *where* the user is in a symbolic, emotional, or procedural arc.  
+Engines use this to shape transitions, harmonic evolution, and temporal structure.
+
+## 6.1 Fields
+
+```json
+"phase": {
+  "state": "entry | ascent | peak | descent | integration",
+  "progress": 0.0,
+  "transition": { "duration": 0.4, "easing": "easeInOut" },
+  "engine_hints": {}
+}
+```
