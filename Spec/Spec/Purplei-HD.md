@@ -28,12 +28,17 @@ It defines **how audio should behave** in adaptive environments.
 
 # 2. Metadata Schema
 
-Purplei‑HD metadata is represented as a structured JSON object.
+Purplei‑HD metadata is represented as a structured JSON object. Implementations SHOULD include root metadata fields to aid validation, provenance, and versioning.
 
 ## 2.1 Root Structure
 
 ```json
 {
+  "schema": "https://example.com/schemas/purplei-hd/1.0/metadata.json",
+  "version": "1.0.0",
+  "timestamp": "2025-12-24T03:46:46Z",
+  "source": "device/sensor-suite",
+  "confidence": 0.87,
   "stance": { ... },
   "phase": { ... },
   "geometry": { ... },
@@ -42,6 +47,13 @@ Purplei‑HD metadata is represented as a structured JSON object.
   "space": { ... }
 }
 ```
+
+Notes:
+- schema: canonical URI for schema used (machine-discoverable)
+- version: semantic version of the metadata payload
+- timestamp: ISO 8601 UTC timestamp for when the payload was produced
+- source: producer identifier (sensor, model, or engine)
+- confidence: optional normalized confidence (0.0–1.0) about the provided metadata
 
 ---
 
@@ -54,13 +66,19 @@ Represents the user’s **behavioral mode**. The stance layer informs how audio 
 ```json
 "stance": {
   "mode": "still | moving | focused | open | ritual",
-  "intensity": 0.0
+  "intensity": 0.0,
+  "transition": { "duration": 0.25, "easing": "easeInOut" },
+  "mode_history": [],
+  "engine_hints": {}
 }
 ```
 
 Notes:
 - mode: one of the enumerated strings describing behavioral modes. Engines MUST treat unknown modes as "open" when possible.
 - intensity: a normalized floating point value in the range 0.0–1.0 indicating the strength of the stance. Default: 0.0.
+- transition: optional object describing how to smoothly apply changes (see 3.4)
+- mode_history: optional ordered list of recent modes with timestamps (see 3.5)
+- engine_hints: optional key-value map to suggest parameter mappings for engines (non-normative)
 
 ## 3.2 Mode Descriptions
 
@@ -74,31 +92,168 @@ Notes:
 
 - Range: 0.0 (none) to 1.0 (maximum).
 - Interpretation: Engines map intensity to effect depth, modulation amount, mix level, or other continuous parameters. Designers SHOULD document the mapping for each engine.
-- Default: 0.0 (when omitted).
+- Default: 0.0 (when omitted). Engines MUST clamp values to [0.0, 1.0].
 
-## 3.4 JSON Schema (example)
+## 3.4 Transition Metadata
+
+To avoid abrupt audio changes, producers MAY include a transition object describing how to interpolate between previous and current stance values.
+
+```json
+"transition": {
+  "duration": 0.25,
+  "easing": "linear" // one of: linear, easeIn, easeOut, easeInOut
+}
+```
+
+- duration: seconds to interpolate over (non-negative number).
+- easing: easing algorithm for the interpolation; engines MAY use a mapping to their internal smoothing functions.
+
+## 3.5 Mode History
+
+Providing temporal context can improve detection of patterns such as rituals or oscillations. Mode history is optional and SHOULD be bounded in length.
+
+```json
+"mode_history": [
+  { "mode": "still", "since": "2025-12-24T03:40:00Z" },
+  { "mode": "moving", "since": "2025-12-24T03:42:10Z" }
+]
+```
+
+## 3.6 Engine Hints (non-normative)
+
+engine_hints is an optional map that suggests how to map stance fields to engine parameters. Hints are advisory only and MUST NOT be treated as authoritative.
+
+```json
+"engine_hints": {
+  "reverb_wet": "intensity * 0.6",
+  "filter_cutoff": "2000 + (intensity * 4000)",
+  "lfo_depth": "intensity"
+}
+```
+
+## 3.7 Implementation Guidance
+
+- Mapping: Engines SHOULD document how intensity maps to audio parameters (e.g., reverb wetness, filter cutoff, modulation depth).
+- Transitions: For smooth UX, interpolate intensity and mode transitions over a short time window rather than applying abrupt changes.
+- Fallbacks: If mode is missing or unrecognized, treat as "open" and use intensity if present.
+- Validation: Engines SHOULD validate incoming metadata against the JSON Schema and clamp or default missing fields where appropriate.
+
+---
+
+# 4. Enhancements and Extensions
+
+This section contains optional extensions and operational guidance to improve interoperability and adoption.
+
+## 4.1 JSON-LD and Canonical Schema
+
+To support discoverability and linked-data tooling, producers MAY publish a JSON-LD @context and use a canonical schema URI in the root "schema" property. Example @context (non-normative):
+
+```json
+"@context": {
+  "Purplei": "https://example.com/ns/purplei#",
+  "stance": "Purplei:stance",
+  "mode": "Purplei:mode",
+  "intensity": "Purplei:intensity"
+}
+```
+
+## 4.2 Privacy and Security Guidance
+
+Stance may be derived from sensitive sensor data (pose, camera, biometric). Implementers MUST consider privacy and follow these guidelines:
+
+- Data minimization: transmit only the metadata required for audio behavior, not raw sensor streams.
+- Anonymization: avoid embedding persistent identifiers in metadata unless necessary; prefer ephemeral sources.
+- Consent: ensure user consent covers the use of inferred behavioral metadata.
+- Local processing: when possible, compute stance on-device and transmit only the resulting small metadata payload.
+- Logging: avoid long-term storage of fine-grained modality timestamps (mode_history) unless explicitly allowed.
+
+## 4.3 Conformance Tests (suggested)
+
+Provide example test vectors and expected behaviors for engines. Minimal test cases:
+
+- Test A: Missing mode — payload { "stance": { "intensity": 0.5 } } should be treated as mode="open" and intensity=0.5.
+- Test B: Intensity clamping — payload with intensity=1.5 should be clamped to 1.0.
+- Test C: Transition smoothing — sudden mode change with transition.duration=0.5 should ramp parameters over ~0.5s.
+- Test D: Mode history usage — engine that detects ritual should identify repeating mode patterns in mode_history.
+
+## 4.4 Reference Implementations and Snippets
+
+TypeScript interface (example):
+
+```ts
+export interface Stance {
+  mode: 'still' | 'moving' | 'focused' | 'open' | 'ritual';
+  intensity?: number; // 0.0 - 1.0
+  transition?: { duration: number; easing?: 'linear'|'easeIn'|'easeOut'|'easeInOut' };
+  mode_history?: { mode: string; since: string }[];
+  engine_hints?: Record<string, any>;
+}
+```
+
+Python dataclass (example):
+
+```py
+from dataclasses import dataclass
+from typing import Optional, List, Dict
+
+@dataclass
+class ModeHistoryEntry:
+    mode: str
+    since: str
+
+@dataclass
+class Transition:
+    duration: float
+    easing: Optional[str] = 'linear'
+
+@dataclass
+class Stance:
+    mode: str
+    intensity: float = 0.0
+    transition: Optional[Transition] = None
+    mode_history: Optional[List[ModeHistoryEntry]] = None
+    engine_hints: Optional[Dict[str, object]] = None
+```
+
+## 4.5 Expanded JSON Schema (root + stance)
 
 ```json
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "Purplei-HD Stance",
+  "title": "Purplei-HD Metadata",
   "type": "object",
   "properties": {
+    "schema": { "type": "string", "format": "uri" },
+    "version": { "type": "string" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "source": { "type": "string" },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
     "stance": {
       "type": "object",
       "properties": {
-        "mode": {
-          "type": "string",
-          "enum": ["still", "moving", "focused", "open", "ritual"],
-          "description": "Behavioral mode"
+        "mode": { "type": "string", "enum": ["still", "moving", "focused", "open", "ritual"] },
+        "intensity": { "type": "number", "minimum": 0, "maximum": 1, "default": 0 },
+        "transition": {
+          "type": "object",
+          "properties": {
+            "duration": { "type": "number", "minimum": 0 },
+            "easing": { "type": "string", "enum": ["linear","easeIn","easeOut","easeInOut"] }
+          },
+          "additionalProperties": false
         },
-        "intensity": {
-          "type": "number",
-          "minimum": 0.0,
-          "maximum": 1.0,
-          "default": 0.0,
-          "description": "Normalized intensity of the stance"
-        }
+        "mode_history": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "mode": { "type": "string" },
+              "since": { "type": "string", "format": "date-time" }
+            },
+            "required": ["mode","since"],
+            "additionalProperties": false
+          }
+        },
+        "engine_hints": { "type": "object", "additionalProperties": true }
       },
       "required": ["mode"],
       "additionalProperties": false
@@ -109,48 +264,34 @@ Notes:
 }
 ```
 
-## 3.5 Examples
-
-Example 1 — stationary, low-intensity:
+## 4.6 Example Full Payload
 
 ```json
 {
-  "stance": {
-    "mode": "still",
-    "intensity": 0.1
-  }
-}
-```
-
-Example 2 — moving, high-intensity:
-
-```json
-{
+  "schema": "https://example.com/schemas/purplei-hd/1.0/metadata.json",
+  "version": "1.0.0",
+  "timestamp": "2025-12-24T03:46:46Z",
+  "source": "device/pose-v2",
+  "confidence": 0.92,
   "stance": {
     "mode": "moving",
-    "intensity": 0.85
+    "intensity": 0.85,
+    "transition": { "duration": 0.3, "easing": "easeInOut" },
+    "mode_history": [
+      { "mode": "still", "since": "2025-12-24T03:40:00Z" },
+      { "mode": "moving", "since": "2025-12-24T03:42:10Z" }
+    ],
+    "engine_hints": { "reverb_wet": "intensity * 0.6" }
   }
 }
 ```
 
-Example 3 — focused with moderate intensity in a full metadata payload:
+---
 
-```json
-{
-  "stance": { "mode": "focused", "intensity": 0.6 },
-  "phase": { ... },
-  "geometry": { ... },
-  "affect": { ... },
-  "identity": { ... },
-  "space": { ... }
-}
-```
+# 5. Conformance and Attribution
 
-## 3.6 Implementation Guidance
-
-- Mapping: Engines SHOULD document how intensity maps to audio parameters (e.g., reverb wetness, filter cutoff, modulation depth).
-- Transitions: For smooth UX, interpolate intensity and mode transitions over a short time window rather than applying abrupt changes.
-- Fallbacks: If mode is missing or unrecognized, treat as "open" and use intensity if present.
+- Engines and producers that implement Purplei‑HD SHOULD declare which schema version they support using the root "schema" and "version" fields.
+- When extending the spec, use a vendor prefix and publish the extension schema URI.
 
 ---
 
