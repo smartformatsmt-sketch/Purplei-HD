@@ -175,22 +175,49 @@ Provide example test vectors and expected behaviors for engines. Minimal test ca
 - Test B: Intensity clamping — payload with intensity=1.5 should be clamped to 1.0.
 - Test C: Transition smoothing — sudden mode change with transition.duration=0.5 should ramp parameters over ~0.5s.
 - Test D: Mode history usage — engine that detects ritual should identify repeating mode patterns in mode_history.
+- Test E: Phase progress clamping — payload with phase.progress=1.2 should be clamped to 1.0.
+- Test F: Missing phase state — payload { "phase": { "progress": 0.5 } } should default state to "integration" and use progress.
 
 ## 4.4 Reference Implementations and Snippets
 
-TypeScript interface (example):
+TypeScript interfaces (example):
 
 ```ts
+export type PhaseState = 'entry' | 'ascent' | 'peak' | 'descent' | 'integration';
+
+export interface Transition {
+  duration: number;
+  easing?: 'linear'|'easeIn'|'easeOut'|'easeInOut';
+}
+
 export interface Stance {
   mode: 'still' | 'moving' | 'focused' | 'open' | 'ritual';
   intensity?: number; // 0.0 - 1.0
-  transition?: { duration: number; easing?: 'linear'|'easeIn'|'easeOut'|'easeInOut' };
+  transition?: Transition;
   mode_history?: { mode: string; since: string }[];
   engine_hints?: Record<string, any>;
 }
+
+export interface Phase {
+  state: PhaseState;
+  progress?: number; // 0.0 - 1.0
+  transition?: Transition;
+  engine_hints?: Record<string, any>;
+}
+
+export interface PurpleiHDMetadata {
+  schema: string;
+  version: string;
+  timestamp: string;
+  source?: string;
+  confidence?: number;
+  stance: Stance;
+  phase?: Phase;
+  [key: string]: any;
+}
 ```
 
-Python dataclass (example):
+Python dataclasses (example):
 
 ```py
 from dataclasses import dataclass
@@ -213,9 +240,27 @@ class Stance:
     transition: Optional[Transition] = None
     mode_history: Optional[List[ModeHistoryEntry]] = None
     engine_hints: Optional[Dict[str, object]] = None
+
+@dataclass
+class Phase:
+    state: str
+    progress: float = 0.0
+    transition: Optional[Transition] = None
+    engine_hints: Optional[Dict[str, object]] = None
+
+@dataclass
+class PurpleiHDMetadata:
+    schema: str
+    version: str
+    timestamp: str
+    source: Optional[str] = None
+    confidence: Optional[float] = None
+    stance: Stance = None
+    phase: Optional[Phase] = None
+    extra: Optional[Dict[str, object]] = None
 ```
 
-## 4.5 Expanded JSON Schema (root + stance)
+## 4.5 Expanded JSON Schema (root + stance + phase)
 
 ```json
 {
@@ -257,6 +302,24 @@ class Stance:
       },
       "required": ["mode"],
       "additionalProperties": false
+    },
+    "phase": {
+      "type": "object",
+      "properties": {
+        "state": { "type": "string", "enum": ["entry","ascent","peak","descent","integration"] },
+        "progress": { "type": "number", "minimum": 0, "maximum": 1, "default": 0 },
+        "transition": {
+          "type": "object",
+          "properties": {
+            "duration": { "type": "number", "minimum": 0 },
+            "easing": { "type": "string", "enum": ["linear","easeIn","easeOut","easeInOut"] }
+          },
+          "additionalProperties": false
+        },
+        "engine_hints": { "type": "object", "additionalProperties": true }
+      },
+      "required": ["state"],
+      "additionalProperties": false
     }
   },
   "required": ["stance"],
@@ -282,6 +345,15 @@ class Stance:
       { "mode": "moving", "since": "2025-12-24T03:42:10Z" }
     ],
     "engine_hints": { "reverb_wet": "intensity * 0.6" }
+  },
+  "phase": {
+    "state": "ascent",
+    "progress": 0.42,
+    "transition": { "duration": 0.4, "easing": "easeInOut" },
+    "engine_hints": {
+      "spectral_tilt": "-6 + (progress * -12)",
+      "reverb_size": "0.4 + (progress * 0.6)"
+    }
   }
 }
 ```
@@ -311,3 +383,57 @@ Engines use this to shape transitions, harmonic evolution, and temporal structur
   "engine_hints": {}
 }
 ```
+
+- state: one of the enumerated strings describing the phase within an arc. Engines SHOULD treat unknown states as "integration" when possible.
+- progress: normalized value (0.0–1.0) indicating how far along the current phase is; engines map this to temporal envelopes, morph targets, or modulation indices.
+- transition: optional smoothing metadata to drive crossfades or parameter ramps between phases.
+- engine_hints: optional advisory mappings for engine-specific parameters (non-normative).
+
+## 6.2 Engine Hints and Examples (non-normative)
+
+The Phase layer benefits from explicit engine hint examples to guide implementers. Below are a handful of illustrative mappings showing how "progress" or "state" could be mapped to audio parameters. These are advisory only.
+
+Example engine_hints for Phase:
+
+```json
+"engine_hints": {
+  "spectral_tilt": "-6 + (progress * -12)",    // dB per octave, more negative as phase progresses
+  "reverb_size": "0.4 + (progress * 0.6)",      // mix between 0.4 -> 1.0
+  "mod_index": "progress * 5",                 // modulation depth 0 -> 5
+  "voice_brightness": "(state == 'peak') ? 1.0 : (progress)"
+}
+```
+
+Interpretation guidance:
+- spectral_tilt: engines can map this to filter/equalizer settings to darken or brighten timbre over the phase.
+- reverb_size: maps to perceived environmental size or wet/dry mix.
+- mod_index: maps to LFO or FM modulation depth for evolving textures.
+- voice_brightness: conditional hint to sharply increase brightness at the peak state.
+
+## 6.3 Implementation Guidance
+
+- Progress mapping: Engines SHOULD clamp progress to [0.0, 1.0] and document how progress affects parameters.
+- State fallbacks: For missing or unknown phase.state, default to "integration" and use progress if present.
+- Transitions: When both stance.transition and phase.transition are present, engines MAY combine or prioritize according to local policy (e.g., phase transitions govern long-form structure, stance transitions govern immediate timbral changes).
+- Validation: Include phase in schema validation and ensure numerical fields are clamped.
+
+## 6.4 Example Phase Usage Patterns
+
+- entry -> ascent: gradually open a filter and increase reverb_size, introduce harmonic layers.
+- peak: emphasize brightness and transient clarity; increase modulation intensity for highlight effects.
+- descent -> integration: reduce modulation, narrow bandwidth, and reduce reverb to return to ambient state.
+
+---
+
+# 7. Privacy, Attribution, and Versioning (continued)
+
+See Section 4.2 for privacy guidance and Section 5 for conformance rules.
+
+---
+
+# Appendix: Additional Phase Conformance Tests
+
+- Phase Test 1: Missing state — { "phase": { "progress": 0.3 } } -> default state="integration", progress=0.3
+- Phase Test 2: Progress clamping — { "phase": { "state": "ascent", "progress": -0.5 } } -> progress clamped to 0.0
+- Phase Test 3: Engine hints parsing — ensure engine_hints strings are treated as advisory, not executed as code (engines must parse safely).
+
